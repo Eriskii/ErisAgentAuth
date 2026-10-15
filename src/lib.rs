@@ -63,8 +63,6 @@ pub enum SignInMethod {
     CredentialsFile,
     /// The login macOS Claude Code keeps in the Keychain.
     Keychain,
-    /// A long-lived token from `claude setup-token`.
-    SetupToken,
 }
 
 /// A sign-in under way: the page that finishes it, and for a device code the code to enter

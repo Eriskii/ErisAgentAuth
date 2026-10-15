@@ -120,51 +120,6 @@ async fn a_login_anthropic_refuses_is_not_kept() {
     assert_eq!(account.snapshot().status, Status::SignedOut);
 }
 
-#[tokio::test]
-async fn a_setup_token_signs_in_and_never_refreshes() {
-    let (base, counts, _server) = claude_server().await;
-    let file = AccountFile::new();
-    let (account, _events) = account(&file, &base);
-    assert!(account.snapshot().sign_in_methods.contains(&SignInMethod::SetupToken));
-    let snapshot = account.import_token("  sk-ant-oat01-long-lived\n").await.unwrap();
-    assert_eq!(snapshot.status, Status::Connected);
-    assert_eq!(snapshot.email.as_deref(), Some("person@example.test"));
-    assert_eq!(snapshot.plan.as_deref(), Some("max"), "the plan comes from the organization");
-    let login = account.current().await.unwrap();
-    assert_eq!(login.access, "sk-ant-oat01-long-lived");
-    assert_eq!((login.refresh, login.expires), (None, None));
-    assert_eq!(login.account_id.as_deref(), Some("claude-account"));
-    assert_eq!(Counts::get(&counts.refreshes), 0);
-    assert_eq!(file.mode(), 0o600);
-    let (again, _) = self::account(&file, &base);
-    assert_eq!(again.current().await.unwrap().access, "sk-ant-oat01-long-lived", "the token is kept");
-}
-
-#[tokio::test]
-async fn a_setup_token_that_cannot_read_the_profile_is_checked_against_the_models() {
-    let (base, counts, _server) = claude_server().await;
-    let file = AccountFile::new();
-    let (account, _events) = account(&file, &base);
-    let snapshot = account.import_token("sk-ant-oat01-inference-only").await.unwrap();
-    assert_eq!(snapshot.status, Status::Connected);
-    assert_eq!(snapshot.email, None);
-    assert_eq!(Counts::get(&counts.models), 1);
-}
-
-#[tokio::test]
-async fn a_token_anthropic_refuses_or_that_is_no_token_is_not_kept() {
-    let (base, counts, _server) = claude_server().await;
-    let file = AccountFile::new();
-    let (account, _events) = account(&file, &base);
-    for not_a_token in ["", "   ", "sk-ant-api03-an-api-key", "sk-ant-oat01 with spaces"] {
-        assert!(account.import_token(not_a_token).await.is_err(), "{not_a_token:?}");
-    }
-    assert_eq!(Counts::get(&counts.profiles), 0, "malformed tokens are refused before asking Anthropic");
-    counts.refuse.store(true, Ordering::SeqCst);
-    assert!(account.import_token("sk-ant-oat01-revoked").await.is_err());
-    assert_eq!(account.snapshot().status, Status::SignedOut);
-}
-
 #[test]
 fn only_claude_code_logins_that_can_make_model_calls_parse() {
     let login = ClaudeLogin::parse(&credentials(5)).unwrap();

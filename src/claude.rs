@@ -1,10 +1,8 @@
 //! The Claude account: a Claude subscription's login, taken from the `.credentials.json` Claude
-//! Code writes, or on macOS, where Claude Code keeps its login in the Keychain, from there; or a
-//! long-lived token from `claude setup-token`. The account keeps its own copy of a Claude Code
-//! login and refreshes it before it expires. Claude refresh tokens are single-use, so once the
-//! account refreshes its copy, the Claude Code session it came from signs in again, and the other
-//! way around. A setup token has no refresh token and does not expire, so it is shared with no
-//! one.
+//! Code writes, or on macOS, where Claude Code keeps its login in the Keychain, from there. The
+//! account keeps its own copy and refreshes it before it expires. Claude refresh tokens are
+//! single-use, so once the account refreshes its copy, the Claude Code session it came from
+//! signs in again, and the other way around.
 use crate::storage::{read_json, write_json};
 use crate::{AccountSnapshot, Event, Provider, REFRESH_MARGIN_MS, SignInMethod, Status, now};
 use anyhow::{Result, anyhow, bail, ensure};
@@ -199,36 +197,12 @@ impl ClaudeAccount {
             };
         }
         let profile = self.profile(&login.access).await?;
-        fill(&mut login, &profile);
-        self.save(&mut state, Some(login))?;
-        state.refused = None;
-        self.changed(&state);
-        Ok(snapshot(&state))
-    }
-
-    /// Signs in with a long-lived token from `claude setup-token` (`sk-ant-oat…`), once
-    /// Anthropic accepts it. The account, email and plan come from the login's profile; a token
-    /// made for model calls alone may not read it, and is then checked against the model list.
-    pub async fn import_token(&self, token: &str) -> Result<AccountSnapshot> {
-        let token = token.trim();
-        ensure!(
-            token.starts_with("sk-ant-oat") && !token.contains(char::is_whitespace),
-            "This is not a Claude setup token; run `claude setup-token` and give the sk-ant-oat… token it prints"
-        );
-        let mut state = self.0.state.lock().await;
-        ensure!(!state.stopped, "the Claude account is shut down");
-        let mut login = ClaudeLogin {
-            access: token.to_owned(),
-            refresh: None,
-            expires: None,
-            account_id: None,
-            email: None,
-            plan: None,
-        };
-        match self.profile_status(token).await? {
-            (status, Some(profile)) if status.is_success() => fill(&mut login, &profile),
-            (status, _) if status == reqwest::StatusCode::FORBIDDEN => self.models_accept(token).await?,
-            (status, _) => bail!("Anthropic refused this token ({status}); make a new one with `claude setup-token`"),
+        login.account_id = profile["account"]["uuid"].as_str().map(str::to_owned).or(login.account_id);
+        login.email = profile["account"]["email"].as_str().map(str::to_owned).or(login.email);
+        if login.plan.is_none() {
+            login.plan = profile["organization"]["organization_type"]
+                .as_str()
+                .map(|kind| kind.strip_prefix("claude_").unwrap_or(kind).to_owned());
         }
         self.save(&mut state, Some(login))?;
         state.refused = None;
@@ -273,42 +247,6 @@ impl ClaudeAccount {
 
     /// The account and organization the token belongs to, which also proves Anthropic accepts
     /// it.
-    async fn profile_status(&self, access: &str) -> Result<(reqwest::StatusCode, Option<Value>)> {
-        let response = self
-            .0
-            .client
-            .get(format!("{}/api/oauth/profile", self.0.api))
-            .bearer_auth(access)
-            .header("anthropic-beta", OAUTH_BETA)
-            .send()
-            .await
-            .map_err(connection)?;
-        let status = response.status();
-        let body = if status.is_success() { Some(response.json().await.map_err(connection)?) } else { None };
-        Ok((status, body))
-    }
-
-    /// Whether Anthropic lets the token list models, which any token that can make model calls
-    /// may.
-    async fn models_accept(&self, access: &str) -> Result<()> {
-        let response = self
-            .0
-            .client
-            .get(format!("{}/v1/models?limit=1", self.0.api))
-            .bearer_auth(access)
-            .header("anthropic-beta", OAUTH_BETA)
-            .header("anthropic-version", "2023-06-01")
-            .send()
-            .await
-            .map_err(connection)?;
-        let status = response.status();
-        ensure!(
-            status.is_success(),
-            "Anthropic refused this token ({status}); make a new one with `claude setup-token`"
-        );
-        Ok(())
-    }
-
     async fn profile(&self, access: &str) -> Result<Value> {
         let response = self
             .0
@@ -375,17 +313,6 @@ impl ClaudeAccount {
     }
 }
 
-/// The account, email and plan a login's profile names, where the login lacks them.
-fn fill(login: &mut ClaudeLogin, profile: &Value) {
-    login.account_id = profile["account"]["uuid"].as_str().map(str::to_owned).or(login.account_id.take());
-    login.email = profile["account"]["email"].as_str().map(str::to_owned).or(login.email.take());
-    if login.plan.is_none() {
-        login.plan = profile["organization"]["organization_type"]
-            .as_str()
-            .map(|kind| kind.strip_prefix("claude_").unwrap_or(kind).to_owned());
-    }
-}
-
 enum Refresh {
     /// Anthropic turned the login down; only a new login helps.
     Refused(String),
@@ -403,7 +330,7 @@ fn snapshot(state: &State) -> AccountSnapshot {
         (Some(_), None) => Status::Connected,
         (None, None) => Status::SignedOut,
     };
-    let mut sign_in_methods = vec![SignInMethod::CredentialsFile, SignInMethod::SetupToken];
+    let mut sign_in_methods = vec![SignInMethod::CredentialsFile];
     if cfg!(target_os = "macos") {
         sign_in_methods.push(SignInMethod::Keychain);
     }

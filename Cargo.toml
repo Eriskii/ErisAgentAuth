@@ -1,6 +1,6 @@
 [package]
 name = "erisagentauth"
-version = "0.2.0"
+version = "0.1.0"
 edition = "2024"
 description = "The ChatGPT and Claude logins Eris apps' agents make model calls with: signing in, storing, refreshing"
 license = "MIT"

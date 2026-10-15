@@ -80,7 +80,6 @@ pub struct Counts {
     pub refreshes: AtomicUsize,
     pub polls: AtomicUsize,
     pub profiles: AtomicUsize,
-    pub models: AtomicUsize,
     pub refuse: AtomicBool,
 }
 
@@ -148,7 +147,6 @@ pub async fn claude_server() -> (String, Arc<Counts>, Served) {
     let router = Router::new()
         .route("/v1/oauth/token", post(claude_token))
         .route("/api/oauth/profile", get(claude_profile))
-        .route("/v1/models", get(claude_models))
         .with_state(counts.clone());
     let (base, served) = serve(router).await;
     (base, counts, served)
@@ -183,10 +181,6 @@ async fn claude_profile(
     if !authorized || !beta || counts.refuse.load(Ordering::SeqCst) {
         return (StatusCode::UNAUTHORIZED, Json(json!({})));
     }
-    // A setup token made for inference alone may not read the profile.
-    if bearer(&headers).contains("inference-only") {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": {"type": "permission_error"}})));
-    }
     (
         StatusCode::OK,
         Json(json!({
@@ -194,20 +188,6 @@ async fn claude_profile(
             "organization": {"organization_type": "claude_max"},
         })),
     )
-}
-
-fn bearer(headers: &axum::http::HeaderMap) -> String {
-    headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned()
-}
-
-/// The Messages API's model list, which any token that can make model calls may read.
-async fn claude_models(State(counts): State<Arc<Counts>>, headers: axum::http::HeaderMap) -> (StatusCode, Json<Value>) {
-    counts.models.fetch_add(1, Ordering::SeqCst);
-    let beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) == Some("oauth-2025-04-20");
-    if !bearer(&headers).starts_with("Bearer ") || !beta || counts.refuse.load(Ordering::SeqCst) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({})));
-    }
-    (StatusCode::OK, Json(json!({"data": [{"id": "claude-haiku-9", "type": "model"}], "has_more": false})))
 }
 
 /// The next sign-in outcome on `events`.

@@ -4,7 +4,7 @@ The logins Eris apps' agents make model calls with: a ChatGPT login, made the wa
 makes one, and a Claude login, taken from Claude Code. Crate `erisagentauth`.
 
 ```toml
-erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.2.0" }
+erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.1.0" }
 ```
 
 Feature `harness` (on by default) makes both accounts `erisharness::provider::Credentials`.
@@ -12,7 +12,7 @@ Feature `harness` (on by default) makes both accounts `erisharness::provider::Cr
 | Module    | What it holds                                                                               |
 | --------- | ------------------------------------------------------------------------------------------- |
 | `openai`  | `OpenAiAccount`: browser sign-in (OAuth with PKCE, back to `localhost:1455`) or device code |
-| `claude`  | `ClaudeAccount`: a `claude setup-token` token, Claude Code's `.credentials.json`, or its macOS Keychain item |
+| `claude`  | `ClaudeAccount`: Claude Code's `.credentials.json`, or on macOS its Keychain item           |
 | (root)    | `Accounts` (both, on one channel), `AccountSnapshot`, `Event`, `App`, `LoginStart`          |
 
 ## Using it
@@ -77,18 +77,6 @@ call only.
 
 Claude refresh tokens are single-use. Once the account refreshes the login it took from Claude
 Code, that Claude Code session has to sign in again, and the other way around.
-
-## Claude logins
-
-`ClaudeAccount::import_token` takes a long-lived token from `claude setup-token`
-(`sk-ant-oat…`). It has no refresh token and no expiry, so it never refreshes and signs nobody
-out. Anthropic has to accept it first: the account, email and plan come from the login's profile,
-and a token that may not read the profile (403) is checked against the model list instead, with
-no email or plan. This is the way to sign in an app without sharing Claude Code's login.
-
-`import` takes Claude Code's `.credentials.json` text and `import_keychain` its macOS Keychain
-item. Both share Claude Code's single-use refresh token: the first refresh on either side signs
-the other out. Signing Claude Code in with its own `CLAUDE_CONFIG_DIR` for the app avoids that.
 
 ## Files
 

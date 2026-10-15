@@ -63,6 +63,8 @@ pub enum SignInMethod {
     CredentialsFile,
     /// The login macOS Claude Code keeps in the Keychain.
     Keychain,
+    /// Claude Code's `.credentials.json`, read where it is on every call and never refreshed.
+    BoundFile,
 }
 
 /// A sign-in under way: the page that finishes it, and for a device code the code to enter
@@ -89,6 +91,8 @@ pub struct AccountSnapshot {
     pub sign_in_methods: Vec<SignInMethod>,
     /// The sign-in under way, while the status is `login-pending`.
     pub login: Option<LoginStart>,
+    /// The credentials file a bound login is read from.
+    pub bound: Option<std::path::PathBuf>,
 }
 
 /// What accounts announce.

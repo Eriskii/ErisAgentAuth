@@ -1,14 +1,20 @@
-//! The Claude account: a Claude subscription's login, taken from the `.credentials.json` Claude
-//! Code writes, or on macOS, where Claude Code keeps its login in the Keychain, from there. The
-//! account keeps its own copy and refreshes it before it expires. Claude refresh tokens are
-//! single-use, so once the account refreshes its copy, the Claude Code session it came from
-//! signs in again, and the other way around.
+//! The Claude account: a Claude subscription's login, from the `.credentials.json` Claude Code
+//! writes, held one of two ways.
+//!
+//! - Imported (`import`, or `import_keychain` on macOS, where Claude Code keeps its login in the
+//!   Keychain): the account keeps its own copy and refreshes it before it expires. Claude refresh
+//!   tokens are single-use, so once the account refreshes its copy, the Claude Code session it
+//!   came from signs in again, and the other way around.
+//! - Bound (`bind`): the account keeps only the file's path and reads the login from it on every
+//!   call. It never refreshes; Claude Code refreshes its own file and the account takes the new
+//!   token as it is, so nothing is signed out. A bound login whose token has expired is an error
+//!   until the file holds a fresh one.
 use crate::storage::{read_json, write_json};
 use crate::{AccountSnapshot, Event, Provider, REFRESH_MARGIN_MS, SignInMethod, Status, now};
 use anyhow::{Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
@@ -83,10 +89,47 @@ struct Stored {
     install_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     login: Option<ClaudeLogin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bound: Option<Bound>,
+}
+
+/// A bound credentials file and who its login belongs to, as Anthropic said when it was bound.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Bound {
+    path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plan: Option<String>,
+}
+
+impl Bound {
+    /// The login in the file now, unless its token has expired.
+    async fn read(&self) -> Result<ClaudeLogin> {
+        let path = self.path.display();
+        let text = tokio::fs::read_to_string(&self.path)
+            .await
+            .map_err(|e| anyhow!("Could not read the Claude login bound at {path}: {e}"))?;
+        let mut login = ClaudeLogin::parse(&text).map_err(|e| anyhow!("{path}: {e}"))?;
+        ensure!(
+            login.expires.is_none_or(|expires| expires > now()),
+            "The Claude login bound at {path} has expired; open Claude Code so it refreshes the file, or sign in again"
+        );
+        login.account_id = self.account_id.clone();
+        login.email = self.email.clone();
+        login.plan = login.plan.or_else(|| self.plan.clone());
+        Ok(login)
+    }
 }
 
 struct State {
     login: Option<ClaudeLogin>,
+    bound: Option<Bound>,
+    /// Why the bound file gives no login now; cleared once it does.
+    unreadable: Option<String>,
     /// Why the stored login no longer works; cleared by adding a login.
     refused: Option<String>,
     stopped: bool,
@@ -120,12 +163,13 @@ impl ClaudeAccount {
                 stored
             }
             None => {
-                let stored = Stored { version: 1, install_id: uuid::Uuid::new_v4().to_string(), login: None };
+                let stored =
+                    Stored { version: 1, install_id: uuid::Uuid::new_v4().to_string(), login: None, bound: None };
                 write_json(&path, &stored)?;
                 stored
             }
         };
-        let state = State { login: stored.login, refused: None, stopped: false };
+        let state = State { login: stored.login, bound: stored.bound, unreadable: None, refused: None, stopped: false };
         Ok(Self(Arc::new(Inner {
             snapshot: Mutex::new(snapshot(&state)),
             path,
@@ -147,7 +191,8 @@ impl ClaudeAccount {
     }
 
     pub async fn signed_in(&self) -> bool {
-        self.0.state.lock().await.login.is_some()
+        let state = self.0.state.lock().await;
+        state.login.is_some() || state.bound.is_some()
     }
 
     fn changed(&self, state: &State) {
@@ -156,11 +201,29 @@ impl ClaudeAccount {
         let _ = self.0.events.send(Event::Account(value));
     }
 
-    /// The login, refreshed first when it is about to expire. Concurrent callers share one
-    /// refresh.
+    /// The login: read from the bound file as it is now, or the imported login, refreshed first
+    /// when it is about to expire. Concurrent callers share one refresh.
     pub async fn current(&self) -> Result<ClaudeLogin> {
         let mut state = self.0.state.lock().await;
         ensure!(!state.stopped, "the Claude account is shut down");
+        if let Some(bound) = state.bound.clone() {
+            return match bound.read().await {
+                Ok(login) => {
+                    if state.unreadable.take().is_some() {
+                        self.changed(&state);
+                    }
+                    Ok(login)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if state.unreadable.as_ref() != Some(&message) {
+                        state.unreadable = Some(message.clone());
+                        self.changed(&state);
+                    }
+                    bail!("{message}")
+                }
+            };
+        }
         if let Some(refused) = &state.refused {
             bail!("{refused}");
         }
@@ -170,7 +233,7 @@ impl ClaudeAccount {
         }
         match self.refresh(&login).await {
             Ok(fresh) => {
-                self.save(&mut state, Some(fresh.clone()))?;
+                self.save(&mut state, Some(fresh.clone()), None)?;
                 self.changed(&state);
                 Ok(fresh)
             }
@@ -204,7 +267,30 @@ impl ClaudeAccount {
                 .as_str()
                 .map(|kind| kind.strip_prefix("claude_").unwrap_or(kind).to_owned());
         }
-        self.save(&mut state, Some(login))?;
+        self.save(&mut state, Some(login), None)?;
+        state.refused = None;
+        self.changed(&state);
+        Ok(snapshot(&state))
+    }
+
+    /// Signs in with the Claude Code credentials file at `path`, kept where it is: from now on
+    /// the login is read from it on every call and never refreshed, until another sign-in or
+    /// signing out replaces the binding. The file must hold a login Anthropic accepts. Replies
+    /// with the account as it now stands.
+    pub async fn bind(&self, path: &Path) -> Result<AccountSnapshot> {
+        let mut bound = Bound { path: std::path::absolute(path)?, account_id: None, email: None, plan: None };
+        let login = bound.read().await?;
+        let mut state = self.0.state.lock().await;
+        ensure!(!state.stopped, "the Claude account is shut down");
+        let profile = self.profile(&login.access).await?;
+        bound.account_id = profile["account"]["uuid"].as_str().map(str::to_owned);
+        bound.email = profile["account"]["email"].as_str().map(str::to_owned);
+        bound.plan = login.plan.or_else(|| {
+            profile["organization"]["organization_type"]
+                .as_str()
+                .map(|kind| kind.strip_prefix("claude_").unwrap_or(kind).to_owned())
+        });
+        self.save(&mut state, None, Some(bound))?;
         state.refused = None;
         self.changed(&state);
         Ok(snapshot(&state))
@@ -227,7 +313,7 @@ impl ClaudeAccount {
 
     pub async fn logout(&self) -> Result<()> {
         let mut state = self.0.state.lock().await;
-        self.save(&mut state, None)?;
+        self.save(&mut state, None, None)?;
         state.refused = None;
         self.changed(&state);
         Ok(())
@@ -238,10 +324,13 @@ impl ClaudeAccount {
         self.0.state.lock().await.stopped = true;
     }
 
-    fn save(&self, state: &mut State, login: Option<ClaudeLogin>) -> Result<()> {
-        let stored = Stored { version: 1, install_id: self.0.install_id.clone(), login };
+    /// Keeps an imported login or a binding (or neither), replacing what was kept before.
+    fn save(&self, state: &mut State, login: Option<ClaudeLogin>, bound: Option<Bound>) -> Result<()> {
+        let stored = Stored { version: 1, install_id: self.0.install_id.clone(), login, bound };
         write_json(&self.0.path, &stored)?;
         state.login = stored.login;
+        state.bound = stored.bound;
+        state.unreadable = None;
         Ok(())
     }
 
@@ -325,24 +414,30 @@ fn connection(error: reqwest::Error) -> anyhow::Error {
 }
 
 fn snapshot(state: &State) -> AccountSnapshot {
-    let status = match (&state.login, &state.refused) {
+    let failure = state.refused.clone().or_else(|| state.unreadable.clone());
+    let status = match (state.login.is_some() || state.bound.is_some(), &failure) {
         (_, Some(_)) => Status::Error,
-        (Some(_), None) => Status::Connected,
-        (None, None) => Status::SignedOut,
+        (true, None) => Status::Connected,
+        (false, None) => Status::SignedOut,
     };
-    let mut sign_in_methods = vec![SignInMethod::CredentialsFile];
+    let mut sign_in_methods = vec![SignInMethod::CredentialsFile, SignInMethod::BoundFile];
     if cfg!(target_os = "macos") {
         sign_in_methods.push(SignInMethod::Keychain);
     }
-    let login = state.login.as_ref();
+    let (email, plan) = match (&state.login, &state.bound) {
+        (Some(login), _) => (login.email.clone(), login.plan.clone()),
+        (None, Some(bound)) => (bound.email.clone(), bound.plan.clone()),
+        (None, None) => (None, None),
+    };
     AccountSnapshot {
         provider_id: Provider::Anthropic,
         provider_label: "Claude".into(),
         status,
-        email: login.and_then(|l| l.email.clone()),
-        plan: login.and_then(|l| l.plan.clone()),
-        detail: state.refused.clone(),
+        email,
+        plan,
+        detail: failure,
         sign_in_methods,
         login: None,
+        bound: state.bound.as_ref().map(|b| b.path.clone()),
     }
 }

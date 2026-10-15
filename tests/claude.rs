@@ -158,3 +158,113 @@ async fn requests_carry_the_login_as_claude_code_does() {
     assert_eq!(identity.install_id, account.install_id());
     assert_eq!(identity.account_id.as_deref(), Some("claude-account"));
 }
+
+/// A Claude Code credentials file at its own path, holding `access` until `expires_in` ms from now.
+fn write_credentials(path: &std::path::Path, access: &str, expires_in: i64) {
+    let text = json!({"claudeAiOauth": {
+        "accessToken": access, "refreshToken": "claude-code-refresh",
+        "expiresAt": (now() as i64 + expires_in), "scopes": ["user:inference", "user:profile"],
+        "subscriptionType": "max",
+    }});
+    std::fs::write(path, text.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn a_bound_file_is_read_on_every_call_and_never_refreshed() {
+    let (base, counts, _server) = claude_server().await;
+    let file = AccountFile::new();
+    let claude_code = file.path.with_file_name(".credentials.json");
+    write_credentials(&claude_code, "from-claude-code-1", 3_600_000);
+    let (account, mut events) = account(&file, &base);
+
+    let snapshot = account.bind(&claude_code).await.unwrap();
+    assert_eq!(snapshot.status, Status::Connected);
+    assert_eq!(snapshot.email.as_deref(), Some("person@example.test"));
+    assert_eq!(snapshot.plan.as_deref(), Some("max"));
+    assert_eq!(snapshot.bound.as_deref(), Some(claude_code.as_path()));
+    assert!(matches!(events.recv().await.unwrap(), Event::Account(s) if s.status == Status::Connected));
+    assert!(file.json()["login"].is_null(), "no tokens are kept, only the path");
+    assert_eq!(file.json()["bound"]["path"], claude_code.to_str().unwrap());
+
+    let login = account.current().await.unwrap();
+    assert_eq!(login.access, "from-claude-code-1");
+    assert_eq!(login.account_id.as_deref(), Some("claude-account"));
+
+    // Claude Code refreshes its own file; the account takes the new token as it is.
+    write_credentials(&claude_code, "from-claude-code-2", 3_600_000);
+    assert_eq!(account.current().await.unwrap().access, "from-claude-code-2");
+    // A token close to its end is still Claude Code's to refresh.
+    write_credentials(&claude_code, "from-claude-code-3", 30_000);
+    assert_eq!(account.current().await.unwrap().access, "from-claude-code-3");
+    assert_eq!(Counts::get(&counts.refreshes), 0, "a bound file is never refreshed");
+}
+
+#[tokio::test]
+async fn an_expired_bound_file_is_an_error_until_claude_code_refreshes_it() {
+    let (base, counts, _server) = claude_server().await;
+    let file = AccountFile::new();
+    let claude_code = file.path.with_file_name(".credentials.json");
+    write_credentials(&claude_code, "fresh", 3_600_000);
+    let (account, _events) = account(&file, &base);
+    account.bind(&claude_code).await.unwrap();
+
+    write_credentials(&claude_code, "stale", -1_000);
+    let error = account.current().await.unwrap_err().to_string();
+    assert!(error.contains("has expired") && error.contains(claude_code.to_str().unwrap()), "{error}");
+    assert_eq!(account.snapshot().status, Status::Error);
+    assert_eq!(account.snapshot().detail.as_deref(), Some(error.as_str()));
+
+    std::fs::remove_file(&claude_code).unwrap();
+    assert!(account.current().await.is_err(), "a missing file is an error too");
+
+    write_credentials(&claude_code, "refreshed", 3_600_000);
+    assert_eq!(account.current().await.unwrap().access, "refreshed");
+    assert_eq!(account.snapshot().status, Status::Connected);
+    assert_eq!(account.snapshot().detail, None);
+    assert_eq!(Counts::get(&counts.refreshes), 0);
+}
+
+#[tokio::test]
+async fn a_binding_lasts_across_runs_until_another_sign_in_replaces_it() {
+    let (base, counts, _server) = claude_server().await;
+    let file = AccountFile::new();
+    let claude_code = file.path.with_file_name(".credentials.json");
+    write_credentials(&claude_code, "bound-token", 3_600_000);
+    let (account, _events) = account(&file, &base);
+    account.bind(&claude_code).await.unwrap();
+
+    let (again, _events) = self::account(&file, &base);
+    assert!(again.signed_in().await);
+    assert_eq!(again.snapshot().bound.as_deref(), Some(claude_code.as_path()));
+    assert_eq!(again.current().await.unwrap().access, "bound-token");
+
+    again.import(&credentials(3_600_000)).await.unwrap();
+    assert_eq!(again.snapshot().bound, None);
+    assert!(file.json()["bound"].is_null());
+    assert_eq!(again.current().await.unwrap().access, "claude-access-0", "the import replaced the binding");
+
+    again.bind(&claude_code).await.unwrap();
+    again.logout().await.unwrap();
+    assert!(!again.signed_in().await);
+    assert!(again.current().await.is_err());
+    assert_eq!(Counts::get(&counts.refreshes), 0);
+}
+
+#[tokio::test]
+async fn binding_refuses_a_file_that_cannot_sign_in() {
+    let (base, counts, _server) = claude_server().await;
+    let file = AccountFile::new();
+    let claude_code = file.path.with_file_name(".credentials.json");
+    let (account, _events) = account(&file, &base);
+
+    assert!(account.bind(&claude_code).await.is_err(), "no file");
+    std::fs::write(&claude_code, "{}").unwrap();
+    assert!(account.bind(&claude_code).await.is_err(), "not a login");
+    write_credentials(&claude_code, "stale", -1_000);
+    assert!(account.bind(&claude_code).await.unwrap_err().to_string().contains("has expired"));
+    write_credentials(&claude_code, "fresh", 3_600_000);
+    counts.refuse.store(true, Ordering::SeqCst);
+    assert!(account.bind(&claude_code).await.is_err(), "Anthropic refuses it");
+    assert_eq!(account.snapshot().status, Status::SignedOut);
+    assert!(file.json()["bound"].is_null());
+}

@@ -401,6 +401,7 @@ fn snapshot(state: &State) -> AccountSnapshot {
         detail,
         sign_in_methods: vec![SignInMethod::Browser, SignInMethod::DeviceCode],
         login: state.pending.as_ref().map(|p| p.start.clone()),
+        bound: None,
     }
 }
 

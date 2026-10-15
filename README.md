@@ -4,7 +4,7 @@ The logins Eris apps' agents make model calls with: a ChatGPT login, made the wa
 makes one, and a Claude login, taken from Claude Code. Crate `erisagentauth`.
 
 ```toml
-erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.1.0" }
+erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.2.0" }
 ```
 
 Feature `harness` (on by default) makes both accounts `erisharness::provider::Credentials`.
@@ -12,7 +12,7 @@ Feature `harness` (on by default) makes both accounts `erisharness::provider::Cr
 | Module    | What it holds                                                                               |
 | --------- | ------------------------------------------------------------------------------------------- |
 | `openai`  | `OpenAiAccount`: browser sign-in (OAuth with PKCE, back to `localhost:1455`) or device code |
-| `claude`  | `ClaudeAccount`: Claude Code's `.credentials.json`, or on macOS its Keychain item           |
+| `claude`  | `ClaudeAccount`: Claude Code's `.credentials.json` imported or bound, or its macOS Keychain item |
 | (root)    | `Accounts` (both, on one channel), `AccountSnapshot`, `Event`, `App`, `LoginStart`          |
 
 ## Using it
@@ -75,14 +75,25 @@ refresh. A refresh the provider turns down (400, 401, 403) puts the account in `
 it there, without asking again, until a new sign-in; a refresh that gets no answer fails that
 call only.
 
-Claude refresh tokens are single-use. Once the account refreshes the login it took from Claude
+Claude refresh tokens are single-use. Once the account refreshes a login it imported from Claude
 Code, that Claude Code session has to sign in again, and the other way around.
+
+## Binding a Claude login
+
+`ClaudeAccount::bind(path)` keeps only the path of a Claude Code `.credentials.json`. Every
+`current()` reads the login from that file as it is then, and the account never refreshes it:
+Claude Code refreshes its own file, the account takes the new token, and no session is signed
+out. When the file's token has expired (or the file is gone), `current()` fails and the snapshot
+shows `error` with the reason, until the file holds a fresh token again. The binding lasts
+across runs until `import`, `import_keychain`, another `bind` or `logout` replaces it. The
+snapshot's `bound` is the file's path.
 
 ## Files
 
 Logins are written owner-only (`0600`) through a temporary file and a rename, so a file is
 whole or absent. `chatgpt.json` is `{"version": 1, "credential": {…}}`; `claude.json` is
-`{"version": 1, "installId": "…", "login": {…}}`, written on first load so the install id that
+`{"version": 1, "installId": "…", "login": {…}}`, or `"bound": {"path": "…", …}` in place of
+`login` for a bound file, written on first load so the install id that
 names the device to Anthropic stays the same from the first run on. Signing out of ChatGPT
 removes its file; signing out of Claude keeps the install id.
 

@@ -3,7 +3,7 @@ name = "erisagentauth"
 version = "0.1.0"
 edition = "2024"
 description = "The ChatGPT and Claude logins Eris apps' agents make model calls with: signing in, storing, refreshing"
-license = "UNLICENSED"
+license = "MIT"
 repository = "https://github.com/Eriskii/ErisAgentAuth"
 readme = "README.md"
 

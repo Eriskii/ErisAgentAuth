@@ -110,6 +110,8 @@ struct Inner {
     events: broadcast::Sender<Event>,
     state: AsyncMutex<State>,
     snapshot: Mutex<AccountSnapshot>,
+    /// The models it offers, as last listed.
+    models: AsyncMutex<crate::models::Kept>,
 }
 
 impl OpenAiAccount {
@@ -151,7 +153,16 @@ impl OpenAiAccount {
             client: crate::client(),
             events,
             state: AsyncMutex::new(state),
+            models: AsyncMutex::new(None),
         })))
+    }
+
+    pub(crate) fn app(&self) -> App {
+        self.0.app
+    }
+
+    pub(crate) fn kept_models(&self) -> &AsyncMutex<crate::models::Kept> {
+        &self.0.models
     }
 
     pub fn snapshot(&self) -> AccountSnapshot {

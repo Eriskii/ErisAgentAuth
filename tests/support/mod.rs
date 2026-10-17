@@ -80,6 +80,7 @@ pub struct Counts {
     pub refreshes: AtomicUsize,
     pub polls: AtomicUsize,
     pub profiles: AtomicUsize,
+    pub listings: AtomicUsize,
     pub refuse: AtomicBool,
 }
 
@@ -110,6 +111,7 @@ pub async fn openai_server() -> (String, Arc<Counts>, Served) {
             post(|| async { Json(json!({"device_auth_id": "device-1", "user_code": "ABCD-1234", "interval": "1"})) }),
         )
         .route("/api/accounts/deviceauth/token", post(openai_poll))
+        .route("/codex/models", get(codex_models))
         .with_state(counts.clone());
     let (base, served) = serve(router).await;
     (base, counts, served)
@@ -147,6 +149,7 @@ pub async fn claude_server() -> (String, Arc<Counts>, Served) {
     let router = Router::new()
         .route("/v1/oauth/token", post(claude_token))
         .route("/api/oauth/profile", get(claude_profile))
+        .route("/v1/models", get(claude_models))
         .with_state(counts.clone());
     let (base, served) = serve(router).await;
     (base, counts, served)
@@ -188,6 +191,76 @@ async fn claude_profile(
             "organization": {"organization_type": "claude_max"},
         })),
     )
+}
+
+/// The Codex endpoint's model list: one model hidden from pickers.
+async fn codex_models(State(counts): State<Arc<Counts>>, headers: axum::http::HeaderMap) -> (StatusCode, Json<Value>) {
+    counts.listings.fetch_add(1, Ordering::SeqCst);
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_owned();
+    if header("chatgpt-account-id") != "account-1" || !header("authorization").starts_with("Bearer ") {
+        return (StatusCode::UNAUTHORIZED, Json(json!({})));
+    }
+    assert_eq!(header("originator"), "testapp");
+    (
+        StatusCode::OK,
+        Json(json!({"models": [
+            {"slug": "gpt-9-sol", "display_name": "GPT-9 Sol", "visibility": "list", "context_window": 400000,
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}, {"effort": "high"}]},
+            {"slug": "gpt-9-luna", "display_name": "GPT-9 Luna", "visibility": "list", "context_window": 200000,
+             "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}]},
+            {"slug": "codex-internal", "visibility": "hide", "supported_reasoning_levels": []},
+        ]})),
+    )
+}
+
+/// Anthropic's model list in two pages: two models that think adaptively, and one that thinks
+/// only on a budget.
+async fn claude_models(
+    State(counts): State<Arc<Counts>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    counts.listings.fetch_add(1, Ordering::SeqCst);
+    let beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok()) == Some("oauth-2025-04-20");
+    if !beta || headers.get("authorization").is_none() {
+        return (StatusCode::UNAUTHORIZED, Json(json!({})));
+    }
+    let adaptive = |efforts: &[&str]| {
+        let mut effort = json!({"supported": true});
+        for level in efforts {
+            effort[level] = json!({"supported": true});
+        }
+        json!({"thinking": {"types": {"adaptive": {"supported": true}}}, "effort": effort})
+    };
+    if query.get("after_id").map(String::as_str) == Some("claude-sonnet-9") {
+        return (
+            StatusCode::OK,
+            Json(json!({"data": [
+                {"id": "claude-old-4-5", "display_name": "Claude Old 4.5", "max_input_tokens": 200000,
+                 "capabilities": {"thinking": {"types": {"enabled": {"supported": true}}}}},
+            ], "has_more": false, "last_id": "claude-old-4-5"})),
+        );
+    }
+    (
+        StatusCode::OK,
+        Json(json!({"data": [
+            {"id": "claude-haiku-9", "display_name": "Claude Haiku 9", "max_input_tokens": 200000,
+             "capabilities": adaptive(&["low", "medium", "high"])},
+            {"id": "claude-sonnet-9", "display_name": "Claude Sonnet 9", "max_input_tokens": 1000000,
+             "capabilities": adaptive(&["low", "medium", "high", "xhigh", "max"])},
+        ], "has_more": true, "last_id": "claude-sonnet-9"})),
+    )
+}
+
+/// Writes a Claude Code credentials file whose token is `access`, expiring `expires_in` ms from
+/// now.
+pub fn write_credentials(path: &std::path::Path, access: &str, expires_in: i64) {
+    let text = json!({"claudeAiOauth": {
+        "accessToken": access, "refreshToken": "claude-code-refresh",
+        "expiresAt": (now() as i64 + expires_in), "scopes": ["user:inference", "user:profile"],
+        "subscriptionType": "max",
+    }});
+    std::fs::write(path, text.to_string()).unwrap();
 }
 
 /// The next sign-in outcome on `events`.

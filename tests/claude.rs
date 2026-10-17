@@ -160,15 +160,6 @@ async fn requests_carry_the_login_as_claude_code_does() {
 }
 
 /// A Claude Code credentials file at its own path, holding `access` until `expires_in` ms from now.
-fn write_credentials(path: &std::path::Path, access: &str, expires_in: i64) {
-    let text = json!({"claudeAiOauth": {
-        "accessToken": access, "refreshToken": "claude-code-refresh",
-        "expiresAt": (now() as i64 + expires_in), "scopes": ["user:inference", "user:profile"],
-        "subscriptionType": "max",
-    }});
-    std::fs::write(path, text.to_string()).unwrap();
-}
-
 #[tokio::test]
 async fn a_bound_file_is_read_on_every_call_and_never_refreshed() {
     let (base, counts, _server) = claude_server().await;

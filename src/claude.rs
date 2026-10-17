@@ -24,6 +24,20 @@ pub const API: &str = "https://api.anthropic.com";
 pub const AUTH: &str = "https://platform.claude.com";
 /// Requests made with a Claude login's token name this beta.
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
+
+/// Where Claude Code keeps its login: `$CLAUDE_CONFIG_DIR/.credentials.json`, or
+/// `~/.claude/.credentials.json`.
+pub fn claude_code_credentials() -> Result<PathBuf> {
+    credentials_in(std::env::var_os("CLAUDE_CONFIG_DIR"), std::env::var_os("HOME"))
+}
+
+fn credentials_in(config_dir: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> Result<PathBuf> {
+    let dir = match config_dir {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(home.ok_or_else(|| anyhow::anyhow!("HOME is not set"))?).join(".claude"),
+    };
+    Ok(dir.join(".credentials.json"))
+}
 /// Claude Code's OAuth client, the only one its logins refresh through.
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 /// What a login needs to make model calls.
@@ -149,6 +163,8 @@ struct Inner {
     events: broadcast::Sender<Event>,
     state: AsyncMutex<State>,
     snapshot: Mutex<AccountSnapshot>,
+    /// The models it offers, as last listed.
+    models: AsyncMutex<crate::models::Kept>,
 }
 
 impl ClaudeAccount {
@@ -179,11 +195,21 @@ impl ClaudeAccount {
             client: crate::client(),
             events,
             state: AsyncMutex::new(state),
+            models: AsyncMutex::new(None),
         })))
     }
 
     pub fn install_id(&self) -> &str {
         &self.0.install_id
+    }
+
+    /// The Anthropic API's root.
+    pub fn api(&self) -> &str {
+        &self.0.api
+    }
+
+    pub(crate) fn kept_models(&self) -> &AsyncMutex<crate::models::Kept> {
+        &self.0.models
     }
 
     pub fn snapshot(&self) -> AccountSnapshot {
@@ -439,5 +465,17 @@ fn snapshot(state: &State) -> AccountSnapshot {
         sign_in_methods,
         login: None,
         bound: state.bound.as_ref().map(|b| b.path.clone()),
+    }
+}
+
+#[cfg(test)]
+mod credentials_tests {
+    use super::*;
+
+    #[test]
+    fn claude_code_keeps_its_login_in_its_config_dir_or_home() {
+        assert_eq!(credentials_in(Some("/c".into()), Some("/h".into())).unwrap(), PathBuf::from("/c/.credentials.json"));
+        assert_eq!(credentials_in(None, Some("/h".into())).unwrap(), PathBuf::from("/h/.claude/.credentials.json"));
+        assert!(credentials_in(None, None).is_err());
     }
 }

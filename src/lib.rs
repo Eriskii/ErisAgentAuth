@@ -15,8 +15,11 @@
 //! ```
 
 pub mod claude;
+pub mod models;
 #[cfg(feature = "harness")]
 mod harness;
+#[cfg(feature = "web")]
+pub use harness::web_models;
 pub mod openai;
 mod storage;
 

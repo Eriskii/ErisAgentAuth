@@ -4,16 +4,19 @@ The logins Eris apps' agents make model calls with: a ChatGPT login, made the wa
 makes one, and a Claude login, taken from Claude Code. Crate `erisagentauth`.
 
 ```toml
-erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.2.0" }
+erisagentauth = { git = "https://github.com/Eriskii/ErisAgentAuth", tag = "v0.3.0" }
 ```
 
-Feature `harness` (on by default) makes both accounts `erisharness::provider::Credentials`.
+Feature `harness` (on by default) makes both accounts `erisharness::provider::Credentials` and
+builds the providers they call; feature `web` adds `web_models`, what ErisHarness's `web` tool
+searches and reads with.
 
 | Module    | What it holds                                                                               |
 | --------- | ------------------------------------------------------------------------------------------- |
 | `openai`  | `OpenAiAccount`: browser sign-in (OAuth with PKCE, back to `localhost:1455`) or device code |
-| `claude`  | `ClaudeAccount`: Claude Code's `.credentials.json` imported or bound, or its macOS Keychain item |
-| (root)    | `Accounts` (both, on one channel), `AccountSnapshot`, `Event`, `App`, `LoginStart`          |
+| `claude`  | `ClaudeAccount`: Claude Code's `.credentials.json` imported or bound, or its macOS Keychain item; `claude_code_credentials()`, where Claude Code keeps it |
+| `models`  | `Model`, and the models each login offers: `OpenAiAccount::models`, `ClaudeAccount::models`, `Accounts::models` |
+| (root)    | `Accounts` (both, on one channel), `AccountSnapshot`, `Event`, `App`, `LoginStart`, `web_models` |
 
 ## Using it
 
@@ -41,18 +44,33 @@ let credential = accounts.openai.current().await?;
 owner-only. An app needing one account loads it alone with `OpenAiAccount::load` or
 `ClaudeAccount::load`, giving the file, the provider's servers and a broadcast sender.
 
-With ErisHarness, the accounts are the credentials:
+With ErisHarness, the accounts are the credentials, and build the providers that call with them:
 
 ```rust
-let provider = Responses::new(ResponsesConfig {
-    base_url: erisagentauth::openai::CODEX_API.into(),
-    headers: vec![("originator".into(), "erismaps".into())],
-    credentials: Arc::new(accounts.openai.clone()),
-    ..
-});
-let identity = accounts.claude.claude_code().await;
-let config = AnthropicConfig::new(Arc::new(accounts.claude.clone()), AnthropicAuth::ClaudeCode(identity));
+use erisagentauth::models::{ANTHROPIC, CODEX};
+
+// The Codex endpoint as the Codex CLI calls it, naming the app as its originator.
+let codex = Arc::new(accounts.openai.codex(erisagentauth::openai::CODEX_API, RateGate::new(64, 512), 5));
+// Anthropic's API as Claude Code calls it; an agent's effort is its adaptive thinking's.
+let anthropic = Arc::new(accounts.claude.anthropic(5).await?);
+let harness = Harness::builder(state).provider(CODEX, codex.clone()).provider(ANTHROPIC, anthropic.clone());
+
+// What agents can run on: ChatGPT's models, then Claude's, each with the efforts it takes.
+let models = accounts.models(erisagentauth::openai::CODEX_API).await?;
+// What `web` searches and reads with: Claude's Haiku, or else ChatGPT's small model.
+let web = erisharness::tools::web::Web::new(http, erisagentauth::web_models(&models, codex, anthropic));
 ```
+
+## Models
+
+`OpenAiAccount::models(codex_api)` lists the ChatGPT login's models from the Codex endpoint
+(those shown in pickers, most preferred first); `ClaudeAccount::models()` lists the Claude
+login's from Anthropic's API, every page, newest first. A model's `efforts` are the reasoning
+efforts it takes. Claude models run with adaptive thinking, so their efforts are those their
+capabilities list for it, and one that thinks only on a budget has `cannot_run` saying so. A
+login that is not signed in lists none; each listing is kept for an hour per login.
+`Accounts::models` gives both, ChatGPT's first, failing only when one fails and the other has
+none. `Model::small` names a provider's small model (luna, mini, haiku…).
 
 ## Snapshots and events
 
